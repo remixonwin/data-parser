@@ -504,14 +504,14 @@ class DatasetBuilder:
         splits_yaml = ""
         if num_records < 4:
             splits_yaml = """- split: train
-    path: "data.parquet" """
+    path: "data.parquet""""
         else:
             splits_yaml = """- split: train
     path: "data/train.parquet"
-  - split: validation
+- split: validation
     path: "data/validation.parquet"
-  - split: test
-    path: "data/test.parquet" """
+- split: test
+    path: "data/test.parquet"""
 
         # YAML Metadata for HF Hub with proper viewer configuration
         yaml_header = f"""---
