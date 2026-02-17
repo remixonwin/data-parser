@@ -500,37 +500,18 @@ class DatasetBuilder:
         """Generate a high-quality Hugging Face Dataset Card (README.md)."""
         repo_name = hub_repo.split("/")[-1].replace("-", " ").title()
 
-        # Determine splits to include in YAML
-        splits_yaml = ""
-        if num_records < 4:
-            splits_yaml = """- split: train
-    path: "data.parquet""""
-        else:
-            splits_yaml = """- split: train
-    path: "data/train.parquet"
-- split: validation
-    path: "data/validation.parquet"
-- split: test
-    path: "data/test.parquet"""
-
-        # YAML Metadata for HF Hub with proper viewer configuration
+        # Simple YAML - let HF auto-detect splits
         yaml_header = f"""---
 language:
 - en
 license: apache-2.0
 task_categories:
-- image-to-text
-- object-detection
+- text-generation
 task_ids:
-- image-captioning
 - text2text-generation
 pretty_name: {repo_name}
 size_categories:
 - n<1K
-configs:
-- config_name: default
-  data_files:
-{splits_yaml}
 ---
 """
 
