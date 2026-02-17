@@ -521,10 +521,9 @@ license: apache-2.0
 task_categories:
 - image-to-text
 - object-detection
-- text-generation
 task_ids:
 - image-captioning
-- text-generation
+- text2text-generation
 pretty_name: {repo_name}
 size_categories:
 - n<1K
