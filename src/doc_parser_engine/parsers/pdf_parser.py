@@ -24,8 +24,10 @@ class PDFParser:
     3. OCR via pytesseract - for scanned/image-only PDFs
     """
 
-    def __init__(self, enable_ocr: bool = True):
+    def __init__(self, enable_ocr: bool = True, render_pages: bool = False, render_dpi: int = 150):
         self.enable_ocr = enable_ocr
+        self.render_pages = render_pages  # Render pages to capture vector graphics
+        self.render_dpi = render_dpi  # DPI for page rendering
 
     def parse(self, file_path: Path) -> dict:
         """Parse PDF and return raw content dict."""
@@ -221,6 +223,13 @@ class PDFParser:
                 unique_images.append(img)
         result["raw_images"] = unique_images
 
+        # NEW: Render pages to capture vector graphics as images
+        # This is needed for PDFs where diagrams are stored as vectors, not embedded images
+        if self.render_pages:
+            rendered_images = self._render_pages_to_images(file_path)
+            result["raw_images"].extend(rendered_images)
+            logger.info(f"Rendered {len(rendered_images)} page images for {file_path.name}")
+
         # Extract references (last pages often have References section)
         result["references"] = self._extract_references(raw_elements)
 
@@ -326,3 +335,49 @@ class PDFParser:
                     break
 
         return refs
+
+    def _render_pages_to_images(self, file_path: Path) -> list[dict]:
+        """
+        Render PDF pages to images to capture vector graphics.
+        
+        This is needed for PDFs where diagrams/figures are stored as vector graphics
+        rather than embedded raster images. PyMuPDF's get_images() only extracts
+        embedded images, not vector content.
+        """
+        import fitz
+        
+        rendered_images = []
+        doc = fitz.open(str(file_path))
+        
+        try:
+            for page_num, page in enumerate(doc):
+                page_idx = page_num + 1
+                
+                # Check if page has significant vector content (likely diagrams)
+                vectors = page.get_drawings()
+                
+                # Only render pages with vector content
+                if vectors:
+                    try:
+                        pix = page.get_pixmap(dpi=self.render_dpi)
+                        img_bytes = pix.tobytes("png")
+                        
+                        if img_bytes:
+                            rendered_images.append({
+                                "image_bytes": img_bytes,
+                                "format": "png",
+                                "width": pix.width,
+                                "height": pix.height,
+                                "page": page_idx,
+                                "bbox": [0, 0, pix.width, pix.height],
+                                "colorspace": "RGB",
+                                "xref": -page_idx,  # Negative to distinguish from extracted images
+                                "is_rendered_page": True,  # Flag to identify rendered page images
+                            })
+                    except Exception as e:
+                        logger.debug(f"Failed to render page {page_idx}: {e}")
+                        continue
+        finally:
+            doc.close()
+        
+        return rendered_images

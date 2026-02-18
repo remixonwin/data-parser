@@ -107,6 +107,8 @@ class DocParserEngine:
         llm_model: str = "gpt-4o",
         force_local_caption: bool = False,
         verbose: bool = False,
+        render_pages: bool = False,
+        render_dpi: int = 150,
     ):
         """
         Initialize DocParserEngine.
@@ -121,6 +123,8 @@ class DocParserEngine:
             batch_size: Batch size for caption generation
             image_min_size: Minimum pixel size to extract images (width or height)
             verbose: Enable verbose logging
+            render_pages: Render PDF pages to images to capture vector graphics
+            render_dpi: DPI for rendering pages (only used if render_pages=True)
         """
         self.enable_captioning = enable_captioning
         self.enable_ocr = enable_ocr
@@ -128,6 +132,8 @@ class DocParserEngine:
         self.batch_size = batch_size
         self.image_min_size = image_min_size
         self.enable_ocr_on_images = enable_ocr_on_images
+        self.render_pages = render_pages
+        self.render_dpi = render_dpi
         self.output_dir = Path(output_dir) if output_dir else Path("./parsed_outputs")
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -196,7 +202,14 @@ class DocParserEngine:
                 f"Unsupported file format: '{ext}'. "
                 f"Supported formats: {list(self.SUPPORTED_FORMATS.keys())}"
             )
-        return parser_cls(enable_ocr=self.enable_ocr)
+        
+        # Pass PDF-specific options
+        kwargs = {"enable_ocr": self.enable_ocr}
+        if ext == ".pdf":
+            kwargs["render_pages"] = self.render_pages
+            kwargs["render_dpi"] = self.render_dpi
+        
+        return parser_cls(**kwargs)
 
     def scout_metadata(self, file_path: Union[str, Path]) -> dict:
         """
@@ -247,8 +260,10 @@ class DocParserEngine:
         structure = self._structure_detector.detect(raw)
 
         # Extract images (but for text-only skip image extraction)
+        # Note: PDFs are classified as text-only by file extension but may contain images
         images = []
-        if input_type != 'text-only':
+        raw_has_images = bool(raw.get("raw_images"))
+        if input_type != 'text-only' or raw_has_images:
             logger.debug("Extracting images...")
             images = self._image_extractor.extract(raw, doc_id=doc_id)
 
@@ -289,8 +304,9 @@ class DocParserEngine:
                 img.setdefault('caption_model', '')
                 img.setdefault('caption_confidence', 0.0)
 
-        # For text-only, ensure images list empty
-        if input_type == 'text-only':
+        # For text-only, ensure images list empty ONLY if no images were actually extracted
+        # Note: PDFs are classified as text-only but may contain images
+        if input_type == 'text-only' and not raw_has_images:
             images = []
 
         # Extract tables
@@ -424,3 +440,156 @@ class DocParserEngine:
     def _count_words(self, paragraphs: list[dict]) -> int:
         """Count total words across paragraphs."""
         return sum(len(p.get("text", "").split()) for p in paragraphs)
+
+
+def generate_page_examples(documents: list[ParsedDocument]) -> list[dict]:
+    """
+    Generate per-page examples from parsed documents.
+    
+    For PDFs: one example per page with deterministic ID (doc_id + page_number)
+    For other formats: one example per document with equivalent metadata
+    
+    Returns list of example dicts with schema-compliant fields:
+    - example_id: deterministic ID (doc_id:page_number)
+    - doc_id: hash of source file
+    - file_path: absolute path to source file
+    - file_name: basename of source file
+    - file_extension: file extension including dot
+    - page_number: 1-based page number (or 1 for non-PDFs)
+    - total_pages: total pages in document
+    - doc_type: document type (pdf, docx, etc.)
+    - title: document title
+    - authors: list of authors
+    - created_at: document creation date
+    - parsed_at: extraction timestamp
+    - extracted_text: full text content of the page
+    - extracted_text_length: character count of text
+    - word_count: word count
+    - images: list of image objects
+    - tables: list of table objects
+    - metadata: dict with additional metadata
+    - extraction_warnings: list of warnings
+    """
+    from pathlib import Path
+    
+    examples = []
+    
+    for doc in documents:
+        # Get the page count - for PDFs this should be > 0
+        page_count = doc.page_count or 1
+        
+        # Determine if it's a PDF
+        is_pdf = doc.doc_type.lower() == "pdf"
+        
+        # Extract file metadata
+        source_path = Path(doc.source_path)
+        file_name = source_path.name
+        file_extension = source_path.suffix
+        
+        if is_pdf and page_count > 1:
+            # Per-page extraction for PDFs
+            # Group elements by page
+            page_elements = {}
+            for para in doc.paragraphs:
+                page = para.get("page", 1)
+                if page not in page_elements:
+                    page_elements[page] = []
+                page_elements[page].append(para)
+            
+            # Group images by page
+            page_images = {}
+            for img in doc.images:
+                page = img.get("page", 1)
+                if page not in page_images:
+                    page_images[page] = []
+                page_images[page].append(img)
+            
+            # Group tables by page
+            page_tables = {}
+            for tbl in doc.tables:
+                page = tbl.get("page", 1)
+                if page not in page_tables:
+                    page_tables[page] = []
+                page_tables[page].append(tbl)
+            
+            # Generate example for each page
+            for page_num in range(1, page_count + 1):
+                # Get text for this page
+                page_text_parts = []
+                
+                # Collect text from paragraphs on this page
+                for para in doc.paragraphs:
+                    if para.get("page") == page_num:
+                        page_text_parts.append(para.get("text", ""))
+                
+                extracted_text = "\n".join(page_text_parts)
+                
+                # Get images for this page
+                page_imgs = page_images.get(page_num, [])
+                
+                # Get tables for this page
+                page_tbls = page_tables.get(page_num, [])
+                
+                # Generate deterministic example ID
+                example_id = f"{doc.doc_id}:{page_num}"
+                
+                example = {
+                    "example_id": example_id,
+                    "doc_id": doc.doc_id,
+                    "file_path": doc.source_path,
+                    "file_name": file_name,
+                    "file_extension": file_extension,
+                    "page_number": page_num,
+                    "total_pages": page_count,
+                    "doc_type": doc.doc_type,
+                    "title": doc.title,
+                    "authors": doc.authors,
+                    "created_at": doc.created_at,
+                    "parsed_at": doc.parsed_at,
+                    "extracted_text": extracted_text,
+                    "extracted_text_length": len(extracted_text),
+                    "word_count": len(extracted_text.split()),
+                    "images": page_imgs,
+                    "tables": page_tbls,
+                    "metadata": doc.metadata,
+                    "extraction_warnings": [],
+                }
+                examples.append(example)
+        else:
+            # Single example for non-PDF or single-page PDFs
+            example_id = f"{doc.doc_id}:1"
+            
+            # Collect all text
+            text_parts = []
+            for para in doc.paragraphs:
+                text_parts.append(para.get("text", ""))
+            
+            extracted_text = "\n".join(text_parts)
+            
+            example = {
+                "example_id": example_id,
+                "doc_id": doc.doc_id,
+                "file_path": doc.source_path,
+                "file_name": file_name,
+                "file_extension": file_extension,
+                "page_number": 1,
+                "total_pages": page_count,
+                "doc_type": doc.doc_type,
+                "title": doc.title,
+                "authors": doc.authors,
+                "created_at": doc.created_at,
+                "parsed_at": doc.parsed_at,
+                "extracted_text": extracted_text,
+                "extracted_text_length": len(extracted_text),
+                "word_count": len(extracted_text.split()),
+                "images": doc.images,
+                "tables": doc.tables,
+                "metadata": doc.metadata,
+                "extraction_warnings": [],
+            }
+            examples.append(example)
+    
+    # Sort examples by file_path, then page_number for stable ordering
+    examples.sort(key=lambda x: (x["file_path"], x["page_number"]))
+    
+    return examples
