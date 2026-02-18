@@ -7,7 +7,10 @@ from typing import Optional, List
 import json
 
 import typer
-import questionary
+try:
+    import questionary
+except Exception:
+    questionary = None
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, MofNCompleteColumn
 from rich.table import Table
@@ -28,6 +31,9 @@ app = typer.Typer(
 console = Console()
 CONFIG_PATH = Path.home() / ".doc-parser-config.json"
 
+DEFAULT_CAPTION_MODEL = "Salesforce/blip2-opt-2.7b"
+
+
 def load_config() -> dict:
     """Load user configuration from disk."""
     if CONFIG_PATH.exists():
@@ -38,10 +44,48 @@ def load_config() -> dict:
             return {}
     return {}
 
+
 def save_config(config: dict):
     """Save user configuration to disk."""
     with open(CONFIG_PATH, "w") as f:
         json.dump(config, f, indent=4)
+
+
+def _choose_caption_model(
+    llm_api_base: Optional[str],
+    llm_model: Optional[str],
+    explicit_caption_model: Optional[str],
+    force_local: bool,
+) -> str:
+    """Choose the final caption model with auto-selection rules.
+
+    Rules implemented:
+      - If an explicit caption_model was provided, honor it only if it's 'api' or force_local is True.
+      - If explicit_caption_model is provided but not force_local and it's not 'api', and a remote LLM
+        (llm_api_base + llm_model) is available, prefer 'api'.
+      - If no explicit model and llm_api_base and llm_model are provided and not force_local -> 'api'.
+      - Otherwise return the default HF model.
+    """
+    logger = logging.getLogger(__name__)
+
+    if explicit_caption_model:
+        if explicit_caption_model == "api":
+            return "api"
+        if force_local:
+            return explicit_caption_model
+        # explicit HF model provided but user didn't force local; prefer API if remote LLM exists
+        if llm_api_base and llm_model:
+            logger.info("Auto-selecting 'api' caption backend because LLM API is available and --force-local-caption not set")
+            return "api"
+        return explicit_caption_model
+
+    # No explicit model
+    if llm_api_base and llm_model and not force_local:
+        logger.info(f"Using remote LLM API at {llm_api_base} with model {llm_model}; captioning backend set to 'api' (no large HF downloads)")
+        return "api"
+
+    return DEFAULT_CAPTION_MODEL
+
 
 def get_engine(
     caption_model: Optional[str] = None,
@@ -54,17 +98,43 @@ def get_engine(
     batch_size: int = 8,
     llm_api_base: Optional[str] = None,
     llm_model: Optional[str] = None,
+    force_local_caption: bool = False,
     verbose: bool = False,
 ) -> DocParserEngine:
-    """Utility to initialize the DocParserEngine with consistent settings."""
+    """Utility to initialize the DocParserEngine with consistent settings.
+
+    Precedence for LLM settings: CLI > ENV > Config file.
+    Environment variables supported: DOCPARSER_LLM_API_BASE, DOCPARSER_LLM_MODEL
+    """
     config = load_config()
-    
-    # Prioritize CLI args > Config File > Defaults
-    final_model = caption_model or config.get("caption_model", "Salesforce/blip2-opt-2.7b")
+
+    # Env overrides
+    env_llm_api = os.getenv("DOCPARSER_LLM_API_BASE")
+    env_llm_model = os.getenv("DOCPARSER_LLM_MODEL")
+
+    # Determine if a caption model was explicitly provided.
+    # Preserve CLI flag default behavior: parse() still provides DEFAULT_CAPTION_MODEL by default,
+    # so treat that value as "not explicitly set" unless the config provides a caption_model.
+    config_caption = config.get("caption_model")
+    explicit_caption_model = None
+    if caption_model is not None and caption_model != DEFAULT_CAPTION_MODEL:
+        # User provided a non-default model via CLI
+        explicit_caption_model = caption_model
+    elif config_caption:
+        # User provided a model via config
+        explicit_caption_model = config_caption
+
+    # Effective LLM settings: CLI > ENV > Config
+    effective_llm_api = llm_api_base or env_llm_api or config.get("llm_api_base")
+    effective_llm_model = llm_model or env_llm_model or config.get("llm_model")
+
+    final_model = _choose_caption_model(effective_llm_api, effective_llm_model, explicit_caption_model, force_local_caption)
+
+    # Prioritize other settings: CLI args > Config File > Defaults
     final_device = device if device != "auto" else config.get("device", "auto")
     final_output = output_dir or config.get("output_dir")
     final_ocr_images = not no_ocr_images if no_ocr_images else config.get("enable_ocr_on_images", True)
-    
+
     return DocParserEngine(
         caption_model=final_model,
         enable_captioning=not no_caption,
@@ -74,10 +144,12 @@ def get_engine(
         output_dir=final_output,
         device=final_device,
         batch_size=batch_size,
-        llm_api_base=llm_api_base or config.get("llm_api_base"),
-        llm_model=llm_model or config.get("llm_model", "gpt-4o"),
+        llm_api_base=effective_llm_api,
+        llm_model=effective_llm_model or "gpt-4o",
+        force_local_caption=force_local_caption,
         verbose=verbose,
     )
+
 
 def get_default_repo_id(path: Path, suggested_title: Optional[str] = None) -> Optional[str]:
     """Generate an intelligent repository ID based on title and environment."""
@@ -132,7 +204,7 @@ def config():
     
     model = questionary.text(
         "Default Caption Model ID:",
-        default=current.get("caption_model", "Salesforce/blip2-opt-2.7b")
+        default=current.get("caption_model", DEFAULT_CAPTION_MODEL)
     ).ask()
     
     device = questionary.select(
@@ -182,7 +254,7 @@ def parse(
     export: str = typer.Option("full", "--export", help="HF Dataset schema (full, chunks, images, minimal, qa)"),
     push: bool = typer.Option(False, "--push", help="Push to HuggingFace Hub"),
     hub_repo: Optional[str] = typer.Option(None, "--hub-repo", help="HF Hub repository ID"),
-    caption_model: str = typer.Option("Salesforce/blip2-opt-2.7b", "--model", help="Captioning model"),
+    caption_model: str = typer.Option(DEFAULT_CAPTION_MODEL, "--model", help="Captioning model"),
     no_caption: bool = typer.Option(False, "--no-caption", help="Disable image captioning"),
     no_ocr: bool = typer.Option(False, "--no-ocr", help="Disable OCR"),
     no_tables: bool = typer.Option(False, "--no-tables", help="Disable table extraction"),
@@ -280,7 +352,7 @@ def parse(
                     "Your HuggingFace token does not have [bold]Write/Create[/bold] permissions.\n\n"
                     "1. Visit [cyan]https://huggingface.co/settings/tokens[/cyan]\n"
                     "2. Ensure your token type is [bold]Write[/bold] or has 'Create Repo' scopes.\n"
-                    "3. Update [bold].env[/bold] with the correct [bold]HF_TOKEN[/bold].",
+                    "3. Update [bold].env[/bold] with the correct [bold]HF_TOKEN[/bold]..",
                     title="Permissions Required",
                     border_style="red"
                 ))
@@ -395,7 +467,7 @@ def interactive_parse():
         export=export,
         push=push,
         hub_repo=hub_repo,
-        caption_model="none" if no_caption else "Salesforce/blip2-opt-2.7b",
+        caption_model="none" if no_caption else DEFAULT_CAPTION_MODEL,
         no_caption=no_caption,
         no_ocr=no_ocr,
         no_tables=no_tables,
@@ -406,6 +478,152 @@ def interactive_parse():
         llm_model=llm_model,
         verbose=True
     )
+
+
+def choose_path_interactive(root: Path = Path.cwd(), input_func=input, print_func=print, max_entries: int = 200) -> Optional[Path]:
+    """Interactive path chooser rooted at `root`.
+
+    Returns the chosen Path or None if cancelled.
+    """
+    workspace_root = Path(root).resolve()
+    current = workspace_root
+    filter_str = ""
+
+    def _list_entries(directory: Path) -> List[Path]:
+        try:
+            entries = [p for p in directory.iterdir()]
+        except Exception:
+            return []
+        # Sort: directories first, then files, both alphabetically
+        entries.sort(key=lambda p: (p.is_file(), p.name.lower()))
+        return entries
+
+    while True:
+        all_entries = _list_entries(current)
+        if filter_str:
+            entries = [p for p in all_entries if filter_str.lower() in p.name.lower()]
+        else:
+            entries = all_entries
+
+        entries = entries[:max_entries]
+
+        print_func(f"\nCurrent: {str(current.relative_to(workspace_root) if current != workspace_root else Path('.'))}")
+        if not entries:
+            print_func("(No entries)")
+        for idx, p in enumerate(entries, start=1):
+            rel = p.relative_to(workspace_root) if workspace_root in p.parents or p == workspace_root else p
+            kind = "[DIR]" if p.is_dir() else "[FILE]"
+            print_func(f"{idx:3d}. {kind} {rel}")
+
+        prompt = "Enter filter (substring), a number to select, 'r <n>' to recurse into a directory, 'u' to go up, or 'q' to cancel: "
+        resp = input_func(prompt).strip()
+
+        if resp == "q":
+            return None
+        if resp == "u":
+            if current == workspace_root:
+                print_func("Already at workspace root")
+            else:
+                current = current.parent
+                filter_str = ""
+            continue
+
+        if resp.startswith("r"):
+            rest = resp[1:].strip()
+            if not rest:
+                # ask for number
+                rest = input_func("Enter directory number to recurse into: ").strip()
+            if rest.isdigit():
+                idx = int(rest) - 1
+                if 0 <= idx < len(entries):
+                    target = entries[idx]
+                    if target.is_dir():
+                        current = target
+                        filter_str = ""
+                    else:
+                        print_func("Selected entry is not a directory")
+                else:
+                    print_func("Index out of range")
+            else:
+                print_func("Invalid directory index")
+            continue
+
+        if resp.isdigit():
+            idx = int(resp) - 1
+            if 0 <= idx < len(entries):
+                return entries[idx].resolve()
+            else:
+                print_func("Index out of range")
+                continue
+
+        # Otherwise treat as filter
+        filter_str = resp
+        continue
+
+
+@app.command("choose-path")
+def choose_path_cmd():
+    """Interactive chooser to select a file or directory under the current workspace.
+
+    Prints the absolute path of the selected entry to stdout and exits with code 0.
+    If the user cancels, exits with code 2.
+    """
+    chosen = choose_path_interactive(Path.cwd(), input_func=input, print_func=print)
+    if chosen:
+        # Print absolute path
+        print(str(chosen))
+        raise typer.Exit(0)
+    else:
+        raise typer.Exit(2)
+
+
+@app.command("audit-dataset")
+def audit_dataset(
+    repo: Optional[str] = typer.Option(None, "--repo", "-r", help="HF repo id"),
+    local_src: Path = typer.Option(Path("prepware_study_guide"), "--local-src", help="Local source dir"),
+    sample: int = typer.Option(10, "--sample", "-s", help="Sample size"),
+    threshold: float = typer.Option(0.6, "--threshold", help="Similarity threshold"),
+    dest: Optional[Path] = typer.Option(None, "--dest", help="Output directory"),
+    no_download: bool = typer.Option(False, "--no-download", help="Skip downloading HF artifacts"),
+):
+    """Run an automated audit of a HuggingFace dataset by sampling records and comparing to local sources.
+
+    Exit codes: 0 success, 1 verification failures, 2 usage/errors.
+    """
+    import datetime
+    from doc_parser_engine import audit as audit_mod
+
+    ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    out_dir = Path(dest) if dest else Path("parsed_outputs") / "prepware_audit" / ts
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    repo_id = repo or os.getenv("REPO_ID") or get_default_repo_id(Path.cwd(), suggested_title=None)
+    if not repo_id:
+        rprint("[red]No repository id provided and REPO_ID env not set[/red]")
+        raise typer.Exit(2)
+
+    try:
+        if not no_download:
+            rprint(f"[dim]Downloading HF artifacts for {repo_id} into {out_dir}[/dim]")
+            art = audit_mod.download_hf_artifacts(repo_id, out_dir)
+        else:
+            art = {"downloaded_files": [], "metadata_path": None}
+
+        results = audit_mod.sample_and_compare(repo_id=repo_id, local_src=local_src, dest=out_dir, sample_size=sample, similarity_threshold=threshold)
+        json_path, md_path = audit_mod.generate_report(results, out_dir)
+        rprint(f"[green]Audit completed. JSON: {json_path} MD: {md_path}[/green]")
+
+        failed = any(not s.get("pass") for s in results.get("samples", []))
+        if failed:
+            rprint(f"[yellow]Some samples failed audit (pass_rate={results['summary']['pass_rate']:.2%}). Exiting with code 1[/yellow]")
+            raise typer.Exit(1)
+        raise typer.Exit(0)
+    except typer.Exit:
+        raise
+    except Exception as e:
+        rprint(f"[red]Audit failed: {e}[/red]")
+        raise typer.Exit(1)
+
 
 if __name__ == "__main__":
     app()

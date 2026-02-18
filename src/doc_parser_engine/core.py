@@ -10,7 +10,7 @@ import uuid
 import logging
 import hashlib
 from pathlib import Path
-from typing import Optional, Union, Iterator
+from typing import Optional, Union, Iterator, List
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 
@@ -22,7 +22,7 @@ from .parsers.epub_parser import EPUBParser
 from .extractors.image_extractor import ImageExtractor
 from .extractors.table_extractor import TableExtractor
 from .captioning.caption_engine import CaptionEngine
-from .detection.structure_detector import StructureDetector
+from .detection.structure_detector import StructureDetector, detect_input_types
 from .dataset.builder import DatasetBuilder
 from .llm_client import LLMClient
 
@@ -105,6 +105,7 @@ class DocParserEngine:
         image_min_size: int = 100,
         llm_api_base: Optional[str] = None,
         llm_model: str = "gpt-4o",
+        force_local_caption: bool = False,
         verbose: bool = False,
     ):
         """
@@ -144,6 +145,7 @@ class DocParserEngine:
         # LLM API setup
         self.llm_api_base = llm_api_base
         self.llm_model = llm_model
+        self.force_local_caption = force_local_caption
         self._llm_client = LLMClient(api_base=llm_api_base, default_model=llm_model) if llm_api_base else None
 
         # Initialize subsystems (lazy-loaded for performance)
@@ -174,12 +176,14 @@ class DocParserEngine:
     def caption_engine(self) -> "CaptionEngine":
         """Lazy-load caption engine."""
         if self._caption_engine is None and self.enable_captioning:
+            # Pass force_local flag and llm_client so caption engine can decide whether to load HF models
             self._caption_engine = CaptionEngine(
                 model_id=self._caption_model_id,
                 device=self.device,
                 batch_size=self.batch_size,
                 enable_ocr_on_images=self.enable_ocr_on_images,
                 llm_client=self._llm_client,
+                force_local=self.force_local_caption,
             )
         return self._caption_engine
 
@@ -228,6 +232,9 @@ class DocParserEngine:
 
         logger.info(f"Parsing: {file_path.name}")
 
+        # Document type detection for pipeline rules
+        input_type = detect_input_types([str(file_path)])
+
         # Generate stable doc ID from file hash
         doc_id = self._compute_doc_id(file_path)
 
@@ -239,14 +246,52 @@ class DocParserEngine:
         logger.debug("Running structure detection...")
         structure = self._structure_detector.detect(raw)
 
-        # Extract images
-        logger.debug("Extracting images...")
-        images = self._image_extractor.extract(raw, doc_id=doc_id)
+        # Extract images (but for text-only skip image extraction)
+        images = []
+        if input_type != 'text-only':
+            logger.debug("Extracting images...")
+            images = self._image_extractor.extract(raw, doc_id=doc_id)
+
+        # Decide caption backend dynamically
+        if input_type == 'text-only':
+            # disable captioning and OCR
+            should_caption = False
+            should_ocr = False
+        elif input_type == 'image-only':
+            should_caption = True
+            should_ocr = True
+            # prefer remote API if available unless force_local_caption is True
+            if self._llm_client and not self.force_local_caption:
+                self._caption_model_id = 'api'
+                logger.info(f"Using remote LLM API at {self.llm_api_base} with model {self.llm_model}; captioning backend set to 'api' (no large HF downloads)")
+        else:  # combined
+            should_caption = True
+            should_ocr = True
+
+        # Apply runtime overrides
+        if not self.enable_captioning:
+            should_caption = False
+        if not self.enable_ocr:
+            should_ocr = False
 
         # Generate captions
-        if self.enable_captioning and images:
+        if should_caption and images:
             logger.debug(f"Captioning {len(images)} images...")
+            # ensure caption engine uses current model id and llm_client/force_local settings
+            # reset caption engine if model id changed
+            if self._caption_engine is not None and self._caption_engine.model_id != self._caption_model_id:
+                self._caption_engine = None
             images = self.caption_engine.caption_batch(images)
+        else:
+            # ensure images have empty caption fields
+            for img in images:
+                img.setdefault('caption', '')
+                img.setdefault('caption_model', '')
+                img.setdefault('caption_confidence', 0.0)
+
+        # For text-only, ensure images list empty
+        if input_type == 'text-only':
+            images = []
 
         # Extract tables
         tables = []
@@ -354,10 +399,6 @@ class DocParserEngine:
                 - chunks: One row per paragraph/section chunk
                 - qa: Document + section pairs for QA tasks
                 - minimal: Lightweight id/title/text only
-            include_images: Include image bytes in dataset
-            push_to_hub: Push dataset to HuggingFace Hub
-            hub_repo: Hub repository ID (e.g., "username/dataset-name")
-            hub_token: HuggingFace API token
 
         Returns:
             datasets.DatasetDict

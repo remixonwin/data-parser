@@ -4,6 +4,7 @@ import base64
 import io
 from typing import Optional, List, Dict, Any
 from PIL import Image
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -19,10 +20,12 @@ class LLMClient:
         api_base: str = "http://0.0.0.0:7543",
         default_model: str = "gpt-4o",
         timeout: float = 30.0,
+        retries: int = 3,
     ):
         self.api_base = api_base.rstrip("/")
         self.default_model = default_model
         self.timeout = timeout
+        self.retries = retries
         self.client = httpx.Client(base_url=self.api_base, timeout=timeout)
 
     def chat_completion(
@@ -35,7 +38,7 @@ class LLMClient:
         quality: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Send a chat completion request to the LLM Manager.
+        Send a chat completion request to the LLM Manager with retries.
         """
         payload = {
             "model": model or self.default_model,
@@ -49,13 +52,36 @@ class LLMClient:
         if quality:
             payload["quality"] = quality
 
-        try:
-            response = self.client.post("/v1/chat/completions", json=payload)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            logger.error(f"LLM API request failed: {e}")
-            raise
+        attempt = 0
+        backoff = 0.5
+        last_exc = None
+        while attempt < self.retries:
+            try:
+                response = self.client.post("/v1/chat/completions", json=payload)
+                response.raise_for_status()
+                return response.json()
+            except httpx.HTTPStatusError as e:
+                # surface HTTP errors with status code and response text
+                status = e.response.status_code if e.response is not None else 'unknown'
+                text = e.response.text if e.response is not None else str(e)
+                # Retry on server errors (5xx)
+                if isinstance(status, int) and 500 <= status < 600:
+                    last_exc = e
+                    attempt += 1
+                    logger.debug(f"LLM API server error {status}, retrying attempt {attempt}/{self.retries}")
+                    time.sleep(backoff)
+                    backoff *= 2
+                    continue
+                logger.error(f"LLM API HTTP error: {status} - {text}")
+                raise RuntimeError(f"LLM API HTTP error: {status} - {text}")
+            except Exception as e:
+                last_exc = e
+                attempt += 1
+                logger.debug(f"LLM API request attempt {attempt} failed: {e}")
+                time.sleep(backoff)
+                backoff *= 2
+        logger.error(f"LLM API request ultimately failed after {self.retries} attempts: {last_exc}")
+        raise RuntimeError(f"LLM API request failed: {last_exc}")
 
     def generate_caption(self, image_bytes: bytes, model: Optional[str] = None) -> str:
         """

@@ -13,7 +13,8 @@ import re
 import logging
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, List, Literal
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -169,12 +170,12 @@ class StructureDetector:
             if font_size in heading_size_map:
                 lvl = heading_size_map[font_size]
                 text = el.get("content", "").strip()
-                
+
                 # Heuristics for valid headings
                 words = text.split()
                 is_mostly_numeric = all(re.match(r'^[\d\.\-\:]+$', w) for w in words)
                 is_equation = "=" in text or "\u03c0" in text or len(re.findall(r'[+\-*/^]', text)) > 1
-                
+
                 if (
                     self.min_heading_length <= len(text) <= self.max_heading_length
                     and not text.endswith(".")
@@ -207,7 +208,7 @@ class StructureDetector:
         section_counter = 0
         para_counter = 0
         current_page = 0
-        
+
         # Buffer for merging consecutive lines into a single paragraph
         text_buffer = []
         buffer_section_id = None
@@ -218,10 +219,10 @@ class StructureDetector:
             nonlocal para_counter
             if not text_buffer:
                 return
-            
+
             para_text = " ".join(text_buffer).strip()
             text_buffer.clear()
-            
+
             words = para_text.split()
             if len(words) < self.min_paragraph_words:
                 return
@@ -285,12 +286,12 @@ class StructureDetector:
                 # If block_id changed or page changed, flush buffer
                 if (block_id != buffer_block_id or page != buffer_page) and text_buffer:
                     flush_buffer()
-                
+
                 if not text_buffer:
                     buffer_section_id = current_section["section_id"] if current_section else None
                     buffer_page = page
                     buffer_block_id = block_id
-                
+
                 text_buffer.append(text)
 
         flush_buffer() # Final flush
@@ -337,3 +338,53 @@ class StructureDetector:
             if re.search(pattern, title_lower):
                 return label
         return None
+
+
+# Utility: detect input types from a list of file paths (files or directories).
+def detect_input_types(paths: List[str]) -> Literal['text-only', 'image-only', 'combined']:
+    """
+    Inspect given paths (files or directories) non-recursively and classify as:
+      - 'text-only'  : only text-like files present (.txt, .md, .pdf, .docx, .html)
+      - 'image-only' : only image file extensions present (.jpg, .jpeg, .png, .tiff, .bmp)
+      - 'combined'   : mixture of both or unknown files
+
+    Directories are scanned non-recursively; their immediate children are inspected.
+    """
+    text_exts = {'.txt', '.md', '.markdown', '.pdf', '.docx', '.doc', '.html', '.htm', '.epub'}
+    image_exts = {'.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp', '.gif'}
+
+    found_text = False
+    found_image = False
+
+    for p in paths:
+        pth = Path(p)
+        if pth.is_dir():
+            try:
+                for child in pth.iterdir():
+                    if child.is_file():
+                        ext = child.suffix.lower()
+                        if ext in text_exts:
+                            found_text = True
+                        elif ext in image_exts:
+                            found_image = True
+            except Exception:
+                # If directory can't be accessed, treat as unknown -> combined
+                return 'combined'
+        else:
+            ext = pth.suffix.lower()
+            if ext in text_exts:
+                found_text = True
+            elif ext in image_exts:
+                found_image = True
+            else:
+                # Unknown file type -> treat as combined to be safe
+                return 'combined'
+
+        if found_text and found_image:
+            return 'combined'
+
+    if found_text and not found_image:
+        return 'text-only'
+    if found_image and not found_text:
+        return 'image-only'
+    return 'combined'

@@ -69,6 +69,7 @@ class CaptionEngine:
         enable_ocr_on_images: bool = True,
         ocr_text_threshold: float = 0.3,  # If >30% pixels are text-like, run OCR
         llm_client: Optional[LLMClient] = None,
+        force_local: bool = False,
     ):
         self.model_id = model_id
         self.device = device
@@ -77,12 +78,13 @@ class CaptionEngine:
         self.enable_ocr_on_images = enable_ocr_on_images
         self.ocr_text_threshold = ocr_text_threshold
         self.llm_client = llm_client
+        self.force_local = force_local
 
         self._model = None
         self._processor = None
         self._model_type = None
 
-        logger.info(f"CaptionEngine: model={model_id} device={device}")
+        logger.info(f"CaptionEngine: model={model_id} device={device} force_local={force_local}")
 
     def _load_model(self):
         """Lazy-load the captioning model."""
@@ -92,7 +94,8 @@ class CaptionEngine:
         config = self.MODEL_CONFIGS.get(self.model_id, {})
         model_type = config.get("type", "blip")
 
-        if model_type == "api":
+        # If model_type is api or we have an llm_client and not forcing local, prefer API path
+        if model_type == "api" or (self.llm_client and not self.force_local):
             if not self.llm_client:
                 logger.warning("API model selected but no LLM client provided. Falling back to alt-text.")
                 self._model = "fallback"
@@ -101,7 +104,16 @@ class CaptionEngine:
             self._model_type = "api"
             return
 
+        # At this point, local HF model loading will only happen if force_local is True or no llm_client available
+        if not self.force_local:
+            logger.info("Local HF model loading suppressed (force_local=False). To load local models set force_local=True")
+            self._model = "fallback"
+            self._model_type = "fallback"
+            return
+
         try:
+            # Warn user about large downloads when attempting HF model loading
+            logger.warning("Loading a local HF model via transformers.from_pretrained. This may download large artifacts. Use --force-local-caption to confirm this behavior.")
             from transformers import (
                 BlipProcessor, BlipForConditionalGeneration,
                 Blip2Processor, Blip2ForConditionalGeneration,
