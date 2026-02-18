@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Build and push amt_airframe.pdf dataset to HuggingFace Hub.
-Uses LLM API for faster captioning.
+Uses render_pages=True to capture vector graphics as images.
 """
 
 import os
@@ -16,13 +16,15 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from doc_parser_engine.core import DocParserEngine
 
-# Initialize engine with LLM API for faster captioning
-print("Initializing DocParserEngine...")
+# Initialize engine with render_pages=True to capture vector graphics
+print("Initializing DocParserEngine with render_pages=True...")
 engine = DocParserEngine(
     enable_captioning=True,
     caption_model="api",  # Use API-based captioning
     llm_api_base="http://0.0.0.0:7543",
     llm_model="gpt-4o",
+    render_pages=True,    # NEW: Enable page rendering to capture vector graphics
+    render_dpi=150,      # DPI for rendered images
     verbose=True,
 )
 
@@ -44,9 +46,28 @@ print(f"  Sections: {len(doc.sections)}")
 print(f"  Paragraphs: {len(doc.paragraphs)}")
 print(f"  Tables: {len(doc.tables)}")
 
-# Show some sample content - sections may be dicts
+# Show some sample images
+if doc.images:
+    print(f"\n--- Sample Images (first 5) ---")
+    for i, img in enumerate(doc.images[:5]):
+        if isinstance(img, dict):
+            img_id = img.get('image_id', 'N/A')
+            width = img.get('width', 'N/A')
+            height = img.get('height', 'N/A')
+            page = img.get('page', 'N/A')
+            caption = img.get('caption', '')[:50] if img.get('caption') else 'No caption'
+        else:
+            img_id = getattr(img, 'image_id', 'N/A')
+            width = getattr(img, 'width', 'N/A')
+            height = getattr(img, 'height', 'N/A')
+            page = getattr(img, 'page', 'N/A')
+            caption = getattr(img, 'caption', '')[:50] if hasattr(img, 'caption') and img.caption else 'No caption'
+        print(f"  {i+1}. ID: {img_id}, Size: {width}x{height}, Page: {page}")
+        print(f"      Caption: {caption}")
+
+# Show sections sample
 if doc.sections:
-    print(f"\nFirst 3 sections:")
+    print(f"\n--- Sample Sections (first 3) ---")
     for i, section in enumerate(doc.sections[:3]):
         if isinstance(section, dict):
             title = section.get('title', 'N/A')
@@ -55,26 +76,6 @@ if doc.sections:
             title = getattr(section, 'title', 'N/A')
             content = getattr(section, 'content', '')[:100]
         print(f"  {i+1}. {title}: {content}...")
-
-if doc.images:
-    print(f"\nImages found: {len(doc.images)}")
-    for i, img in enumerate(doc.images[:3]):
-        if isinstance(img, dict):
-            print(f"  Image {i+1}: {img.get('category', 'N/A')}, page {img.get('page_number', 'N/A')}")
-        else:
-            print(f"  Image {i+1}: {getattr(img, 'category', 'N/A')}, page {getattr(img, 'page_number', 'N/A')}")
-else:
-    print(f"\nNo images found in the PDF")
-
-# Show paragraphs sample
-if doc.paragraphs:
-    print(f"\nFirst 3 paragraphs:")
-    for i, para in enumerate(doc.paragraphs[:3]):
-        if isinstance(para, dict):
-            content = para.get('content', '')[:150]
-        else:
-            content = getattr(para, 'content', '')[:150]
-        print(f"  {i+1}. {content}...")
 
 # Get HuggingFace credentials
 hf_token = os.getenv("HF_TOKEN")
@@ -99,3 +100,13 @@ print(f"   URL: https://huggingface.co/datasets/{hub_repo}")
 print(f"\nDataset info:")
 print(f"  Number of rows: {len(dataset)}")
 print(f"  Columns: {dataset.column_names}")
+
+# Quality summary
+print(f"\n{'='*60}")
+print("QUALITY SUMMARY")
+print(f"{'='*60}")
+print(f"✅ Text: {doc.word_count} words across {doc.page_count} pages")
+print(f"✅ Paragraphs: {len(doc.paragraphs) if isinstance(doc.paragraphs, list) else 'structured'}")
+print(f"✅ Images: {doc.image_count} images (including rendered pages)")
+print(f"✅ Tables: {doc.table_count}")
+print(f"\nDataset URL: https://huggingface.co/datasets/{hub_repo}")

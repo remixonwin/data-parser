@@ -1,0 +1,18 @@
+{
+  "dataset_info": {
+    "description": "A comprehensive dataset extracted from the FAA Aviation Maintenance Technician (AMT) Airframe Handbook, containing text content and rendered page images suitable for training vision-language models.",
+    "citation": "@dataset{amt_airframe_handbook_2026,\n  author = {Federal Aviation Administration},\n  title = {Aviation Maintenance Technician Airframe Handbook},\n  year = {2026},\n  publisher = {HuggingFace},\n  dataset_url = {https://huggingface.co/datasets/Remixonwin/amt-airframe-handbook-dataset}\n}",
+    "homepage": "https://huggingface.co/datasets/Remixonwin/amt-airframe-handbook-dataset",
+    "license": "proprietary",
+    "annotations_creators": ["no-annotation"],
+    "language_creators": ["found"],
+    "languages": ["en"],
+    "multilinguality": ["monolingual"],
+    "size_categories": ["n<1K"],
+    "task_categories": ["question-answering", "text-retrieval", "image-classification"],
+    "task_ids": ["extractive-qa", "open-domain-qa", "document-retrieval"],
+    "train_split_index": 0,
+    "config_name": "default",
+    "version": "1.0.0"
+  }
+}
